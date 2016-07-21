@@ -15,6 +15,9 @@ Cleanup and namespaces - Ondřej Hruška, 2016
 
   https://github.com/MightyPork/phpmodbus
 
+Added handling of already open socket to read/write - Tobias Kluge, 2016
+    https://github.com/tobiaskluge/phpmodbus
+
 
 +---------------------------------------------------------+
 | ORIGINAL LICENSE                                        |

@@ -7,6 +7,7 @@ This is a fork of the original project at https://code.google.com/p/phpmodbus/
 > **What's new**
 > 
 > This fork adds a namespace and fixes issues encountered when porting to PHP 7
+> If the ModbusMaster is already connected, all read/write operations will use the open socket and not open/close a new connection.
 
 **WARNING: Everything except the actual code in this repo may be broken and outdated.**
 

@@ -1,5 +1,5 @@
 {
-  "name": "mightypork/phpmodbus",
+  "name": "tobiaskluge/phpmodbus",
   "keywords": ["phpmodbus","modbus"],
   "description": "PhpModbus with namespaces and updated to PHP 7",
   "license": "LGPL",
@@ -8,6 +8,9 @@
     "ext-sockets": "*"
   },
   "authors": [
+    {
+      "name": "Tobias Kluge"
+    },
     {
       "name": "Honza Krakora",
       "email": "krakora.jan@googlemail.com"

@@ -105,7 +105,7 @@ class ModbusMaster
 	 * @return bool
 	 * @throws Exception
 	 */
-	private function connect()
+	public function connect()
 	{
 		// Create a protocol specific socket
 		if ($this->socket_protocol == "TCP") {
@@ -147,7 +147,7 @@ class ModbusMaster
 	 *
 	 * Disconnect the socket
 	 */
-	private function disconnect()
+	public function disconnect()
 	{
 		socket_close($this->sock);
         $this->connected = false;

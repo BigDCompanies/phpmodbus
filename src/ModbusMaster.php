@@ -49,11 +49,11 @@ class ModbusMaster
 
 	public $host = "192.168.1.1";
 
-	public $port = "502";
+	public $port = 502;
 
 	public $client = "";
 
-	public $client_port = "502";
+	public $client_port = 502;
 
 	public $status;
 
@@ -63,10 +63,22 @@ class ModbusMaster
 
 	public $socket_protocol = "UDP"; // Socket protocol (TCP, UDP)
 
+	public $debug = false;
+
+    /**
+     * @var float $request_delay seconds to delay (or fraction there of) between requests. Needed for some older controllers.
+     */
+	public $request_delay = 0;  
+
     /**
      * @var bool true if socket is connected
      */
     private $connected = false;
+
+    /**
+     * @var float microsecond of last communication - used for request delay.
+     */
+    private $last_request = 0;
 
 	/**
 	 * ModbusMaster
@@ -75,11 +87,13 @@ class ModbusMaster
 	 *
 	 * @param String $host     An IP address of a Modbus TCP device. E.g. "192.168.1.1"
 	 * @param String $protocol Socket protocol (TCP, UDP)
+	 * @param Integer $port    Port number
 	 */
-	public function __construct($host, $protocol)
+	public function __construct($host, $protocol="UDP", $port=502)
 	{
 		$this->socket_protocol = $protocol;
 		$this->host = $host;
+		$this->port = $port;
 	}
 
 	/**
@@ -89,7 +103,7 @@ class ModbusMaster
 	 */
 	public function __toString()
 	{
-		return "<pre>" . $this->status . "</pre>";
+		return $this->status;
 	}
 
 	public function __destruct()
@@ -124,11 +138,12 @@ class ModbusMaster
 				throw new Exception("socket_bind() failed.</br>Reason: ($result)" .
 					socket_strerror(socket_last_error($this->sock)));
 			} else {
-				$this->status .= "Bound\n";
+				$this->log( "Bound" );
 			}
 		}
 		// Socket settings
-		socket_set_option($this->sock, SOL_SOCKET, SO_SNDTIMEO, array('sec' => 1, 'usec' => 0));
+		socket_set_option($this->sock, SOL_SOCKET, SO_SNDTIMEO, array('sec' => $this->timeout_sec, 'usec' => 0));
+		socket_set_option($this->sock, SOL_SOCKET, SO_RCVTIMEO, array('sec' => $this->timeout_sec, 'usec' => 0));
 		// Connect the socket
 		$result = @socket_connect($this->sock, $this->host, $this->port);
 		if ($result === false) {
@@ -136,7 +151,7 @@ class ModbusMaster
 			throw new Exception("socket_connect() failed.</br>Reason: ($result)" .
 				socket_strerror(socket_last_error($this->sock)));
 		} else {
-			$this->status .= "Connected\n";
+			$this->log( "Connected" );
             $this->connected = true;
 			return true;
 		}
@@ -149,9 +164,11 @@ class ModbusMaster
 	 */
 	public function disconnect()
 	{
-		socket_close($this->sock);
-        $this->connected = false;
-		$this->status .= "Disconnected\n";
+		if($this->connected) {
+			socket_close($this->sock);
+	        $this->connected = false;
+			$this->log( "Disconnected" );
+		}
 	}
 
 	/**
@@ -163,8 +180,14 @@ class ModbusMaster
 	 */
 	private function send($packet)
 	{
+		if((microtime(true) - $this->last_request) < $this->request_delay) {
+			$delay = round(1000000*($this->request_delay - (microtime(true) - $this->last_request)));
+			$this->log( "Request too fast, sleeping for $delay");
+			usleep($delay);
+		}
 		socket_write($this->sock, $packet, strlen($packet));
-		$this->status .= "Send\n";
+		$this->log( "Send" );
+		$this->last_request = microtime(true);
 	}
 
 	/**
@@ -184,10 +207,11 @@ class ModbusMaster
 		$rec = "";
 		$lastAccess = time();
 		while (socket_select($readsocks, $writesocks, $exceptsocks, 0, 300000) !== false) {
-			$this->status .= "Wait data ... \n";
+			//$this->log( "Wait data ... " );
 			if (in_array($this->sock, $readsocks)) {
+				//$this->log( "Try Read Data" );
 				while (@socket_recv($this->sock, $rec, 2000, 0)) {
-					$this->status .= "Data received\n";
+					$this->log( "Data received" );
 					return $rec;
 				}
 				$lastAccess = time();
@@ -200,7 +224,7 @@ class ModbusMaster
 			}
 			$readsocks[] = $this->sock;
 		}
-
+		$this->last_request = microtime(true);
 		return null;
 	}
 
@@ -239,7 +263,7 @@ class ModbusMaster
 			// exception response
 			throw new Exception("Modbus response error code: $failure_code ($failure_str)");
 		} else {
-			$this->status .= "Modbus response error code: NOERROR\n";
+			$this->log( "Modbus response error code: NOERROR" );
 			return true;
 		}
 	}
@@ -260,22 +284,22 @@ class ModbusMaster
 	 */
 	public function readCoils($unitId, $reference, $quantity)
 	{
-		$this->status .= "readCoils: START\n";
+		$this->log( "readCoils: START" );
 		// connect
         $alreadyConnected = $this->connected;
         if (!$alreadyConnected) $this->connect();
 		// send FC 1
 		$packet = $this->readCoilsPacketBuilder($unitId, $reference, $quantity);
-		$this->status .= $this->printPacket($packet);
+		$this->log( $this->printPacket($packet) );
 		$this->send($packet);
 		// receive response
 		$rpacket = $this->rec();
-		$this->status .= $this->printPacket($rpacket);
+		$this->log( $this->printPacket($rpacket) );
 		// parse packet
 		$receivedData = $this->readCoilsParser($rpacket, $quantity);
 		// disconnect
 		if (!$alreadyConnected) $this->disconnect();
-		$this->status .= "readCoils: DONE\n";
+		$this->log( "readCoils: DONE" );
 		// return
 		return $receivedData;
 	}
@@ -383,22 +407,22 @@ class ModbusMaster
 	 */
 	public function readInputDiscretes($unitId, $reference, $quantity)
 	{
-		$this->status .= "readInputDiscretes: START\n";
+		$this->log( "readInputDiscretes: START" );
 		// connect
         $alreadyConnected = $this->connected;
         if (!$alreadyConnected) $this->connect();
 		// send FC 2
 		$packet = $this->readInputDiscretesPacketBuilder($unitId, $reference, $quantity);
-		$this->status .= $this->printPacket($packet);
+		$this->log( $this->printPacket($packet) );
 		$this->send($packet);
 		// receive response
 		$rpacket = $this->rec();
-		$this->status .= $this->printPacket($rpacket);
+		$this->log( $this->printPacket($rpacket) );
 		// parse packet
 		$receivedData = $this->readInputDiscretesParser($rpacket, $quantity);
 		// disconnect
 		if (!$alreadyConnected) $this->disconnect();
-		$this->status .= "readInputDiscretes: DONE\n";
+		$this->log( "readInputDiscretes: DONE" );
 		// return
 		return $receivedData;
 	}
@@ -482,22 +506,22 @@ class ModbusMaster
 	 */
 	public function readMultipleRegisters($unitId, $reference, $quantity)
 	{
-		$this->status .= "readMultipleRegisters: START\n";
+		$this->log( "readMultipleRegisters: START" );
 		// connect
         $alreadyConnected = $this->connected;
         if (!$alreadyConnected) $this->connect();
 		// send FC 3
 		$packet = $this->readMultipleRegistersPacketBuilder($unitId, $reference, $quantity);
-		$this->status .= $this->printPacket($packet);
+		$this->log( $this->printPacket($packet) );
 		$this->send($packet);
 		// receive response
 		$rpacket = $this->rec();
-		$this->status .= $this->printPacket($rpacket);
+		$this->log( $this->printPacket($rpacket) );
 		// parse packet
 		$receivedData = $this->readMultipleRegistersParser($rpacket);
 		// disconnect
 		if (!$alreadyConnected) $this->disconnect();
-		$this->status .= "readMultipleRegisters: DONE\n";
+		$this->log( "readMultipleRegisters: DONE" );
 		// return
 		return $receivedData;
 	}
@@ -586,22 +610,22 @@ class ModbusMaster
 	 */
 	public function readMultipleInputRegisters($unitId, $reference, $quantity)
 	{
-		$this->status .= "readMultipleInputRegisters: START\n";
+		$this->log( "readMultipleInputRegisters: START" );
 		// connect
         $alreadyConnected = $this->connected;
         if (!$alreadyConnected) $this->connect();
 		// send FC 4
 		$packet = $this->readMultipleInputRegistersPacketBuilder($unitId, $reference, $quantity);
-		$this->status .= $this->printPacket($packet);
+		$this->log( $this->printPacket($packet) );
 		$this->send($packet);
 		// receive response
 		$rpacket = $this->rec();
-		$this->status .= $this->printPacket($rpacket);
+		$this->log( $this->printPacket($rpacket) );
 		// parse packet
 		$receivedData = $this->readMultipleInputRegistersParser($rpacket);
 		// disconnect
 		if (!$alreadyConnected) $this->disconnect();
-		$this->status .= "readMultipleInputRegisters: DONE\n";
+		$this->log( "readMultipleInputRegisters: DONE" );
 		// return
 		return $receivedData;
 	}
@@ -690,22 +714,22 @@ class ModbusMaster
 	 */
 	public function writeSingleCoil($unitId, $reference, $data)
 	{
-		$this->status .= "writeSingleCoil: START\n";
+		$this->log( "writeSingleCoil: START" );
 		// connect
         $alreadyConnected = $this->connected;
         if (!$alreadyConnected) $this->connect();
 		// send FC5
 		$packet = $this->writeSingleCoilPacketBuilder($unitId, $reference, $data);
-		$this->status .= $this->printPacket($packet);
+		$this->log( $this->printPacket($packet) );
 		$this->send($packet);
 		// receive response
 		$rpacket = $this->rec();
-		$this->status .= $this->printPacket($rpacket);
+		$this->log( $this->printPacket($rpacket) );
 		// parse packet
 		$this->writeSingleCoilParser($rpacket);
 		// disconnect
 		if (!$alreadyConnected) $this->disconnect();
-		$this->status .= "writeSingleCoil: DONE\n";
+		$this->log( "writeSingleCoil: DONE" );
 		return true;
 	}
 
@@ -794,22 +818,22 @@ class ModbusMaster
 	 */
 	public function writeSingleRegister($unitId, $reference, $data)
 	{
-		$this->status .= "writeSingleRegister: START\n";
+		$this->log( "writeSingleRegister: START" );
 		// connect
         $alreadyConnected = $this->connected;
         if (!$alreadyConnected) $this->connect();
 		// send FC6
 		$packet = $this->writeSingleRegisterPacketBuilder($unitId, $reference, $data);
-		$this->status .= $this->printPacket($packet);
+		$this->log( $this->printPacket($packet) ); 
 		$this->send($packet);
 		// receive response
 		$rpacket = $this->rec();
-		$this->status .= $this->printPacket($rpacket);
+		$this->log( $this->printPacket($rpacket) );
 		// parse packet
 		$this->writeSingleRegisterParser($rpacket);
 		// disconnect
 		if (!$alreadyConnected) $this->disconnect();
-		$this->status .= "writeSingleRegister: DONE\n";
+		$this->log( "writeSingleRegister: DONE" );
 		return true;
 	}
 
@@ -893,22 +917,22 @@ class ModbusMaster
 	 */
 	public function writeMultipleCoils($unitId, $reference, $data)
 	{
-		$this->status .= "writeMultipleCoils: START\n";
+		$this->log( "writeMultipleCoils: START" );
 		// connect
         $alreadyConnected = $this->connected;
         if (!$alreadyConnected) $this->connect();
 		// send FC15
 		$packet = $this->writeMultipleCoilsPacketBuilder($unitId, $reference, $data);
-		$this->status .= $this->printPacket($packet);
+		$this->log( $this->printPacket($packet) );
 		$this->send($packet);
 		// receive response
 		$rpacket = $this->rec();
-		$this->status .= $this->printPacket($rpacket);
+		$this->log( $this->printPacket($rpacket) );
 		// parse packet
 		$this->writeMultipleCoilsParser($rpacket);
 		// disconnect
 		if (!$alreadyConnected) $this->disconnect();
-		$this->status .= "writeMultipleCoils: DONE\n";
+		$this->log( "writeMultipleCoils: DONE" );
 		return true;
 	}
 
@@ -959,7 +983,7 @@ class ModbusMaster
 		$data_word_stream[] = $data_word;
 		// show binary stream to status string
 		foreach ($data_word_stream as $d) {
-			$this->status .= sprintf("byte=b%08b\n", $d);
+			$this->log( sprintf("byte=b%08b\n", $d) );
 		}
 		// build data section
 		$buffer1 = "";
@@ -1018,22 +1042,22 @@ class ModbusMaster
 	 */
 	public function writeMultipleRegister($unitId, $reference, $data, $dataTypes)
 	{
-		$this->status .= "writeMultipleRegister: START\n";
+		$this->log( "writeMultipleRegister: START" );
 		// connect
         $alreadyConnected = $this->connected;
         if (!$alreadyConnected) $this->connect();
 		// send FC16
 		$packet = $this->writeMultipleRegisterPacketBuilder($unitId, $reference, $data, $dataTypes);
-		$this->status .= $this->printPacket($packet);
+		$this->log( $this->printPacket($packet) );
 		$this->send($packet);
 		// receive response
 		$rpacket = $this->rec();
-		$this->status .= $this->printPacket($rpacket);
+		$this->log( $this->printPacket($rpacket) );
 		// parse packet
 		$this->writeMultipleRegisterParser($rpacket);
 		// disconnect
 		if (!$alreadyConnected) $this->disconnect();
-		$this->status .= "writeMultipleRegister: DONE\n";
+		$this->log( "writeMultipleRegister: DONE" );
 		return true;
 	}
 
@@ -1136,22 +1160,22 @@ class ModbusMaster
 	 */
 	public function maskWriteRegister($unitId, $reference, $andMask, $orMask)
 	{
-		$this->status .= "maskWriteRegister: START\n";
+		$this->log( "maskWriteRegister: START" );
 		// connect
         $alreadyConnected = $this->connected;
         if (!$alreadyConnected) $this->connect();
 		// send FC22
 		$packet = $this->maskWriteRegisterPacketBuilder($unitId, $reference, $andMask, $orMask);
-		$this->status .= $this->printPacket($packet);
+		$this->log( $this->printPacket($packet) );
 		$this->send($packet);
 		// receive response
 		$rpacket = $this->rec();
-		$this->status .= $this->printPacket($rpacket);
+		$this->log( $this->printPacket($rpacket) );
 		// parse packet
 		$this->maskWriteRegisterParser($rpacket);
 		// disconnect
 		if (!$alreadyConnected) $this->disconnect();
-		$this->status .= "maskWriteRegister: DONE\n";
+		$this->log( "maskWriteRegister: DONE" );
 		return true;
 	}
 
@@ -1240,23 +1264,23 @@ class ModbusMaster
 	 */
 	public function readWriteRegisters($unitId, $referenceRead, $quantity, $referenceWrite, $data, $dataTypes)
 	{
-		$this->status .= "readWriteRegisters: START\n";
+		$this->log( "readWriteRegisters: START" );
 		// connect
         $alreadyConnected = $this->connected;
         if (!$alreadyConnected) $this->connect();
 		// send FC23
 		$packet = $this->readWriteRegistersPacketBuilder($unitId, $referenceRead, $quantity, $referenceWrite, $data,
 			$dataTypes);
-		$this->status .= $this->printPacket($packet);
+		$this->log( $this->printPacket($packet) );
 		$this->send($packet);
 		// receive response
 		$rpacket = $this->rec();
-		$this->status .= $this->printPacket($rpacket);
+		$this->log( $this->printPacket($rpacket) );
 		// parse packet
 		$receivedData = $this->readWriteRegistersParser($rpacket);
 		// disconnect
 		if (!$alreadyConnected) $this->disconnect();
-		$this->status .= "writeMultipleRegister: DONE\n";
+		$this->log( "writeMultipleRegister: DONE" );
 		// return
 		return $receivedData;
 	}
@@ -1395,5 +1419,11 @@ class ModbusMaster
 		}
 		$str .= "\n";
 		return $str;
+	}
+
+	private function log($txt) 
+	{
+		$this->status .= $txt."\n";
+		if($this->debug) echo date( DATE_RFC822 ). " - $txt\n";
 	}
 }

@@ -1,10 +1,10 @@
 {
-  "name": "tobiaskluge/phpmodbus",
+  "name": "serich159/phpmodbus",
   "keywords": ["phpmodbus","modbus"],
   "description": "PhpModbus with namespaces and updated to PHP 7",
   "license": "LGPL",
   "require": {
-    "php": "^5.3.2 || ^7.0",
+    "php": "^7.0",
     "ext-sockets": "*"
   },
   "authors": [
@@ -18,6 +18,10 @@
     {
       "name": "Ondřej Hruška",
       "email": "ondra@ondrovo.com"
+    },
+    {
+      "name": "Erich Simmons",
+      "email": "public@erichsimmons.com"
     }
   ],
   "autoload": {

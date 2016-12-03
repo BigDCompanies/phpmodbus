@@ -135,26 +135,38 @@ class ModbusMaster
 		if (strlen($this->client) > 0) {
 			$result = socket_bind($this->sock, $this->client, $this->client_port);
 			if ($result === false) {
-				throw new Exception("socket_bind() failed.</br>Reason: ($result)" .
+				throw new Exception("socket_bind() failed.\nReason: ($result)" .
 					socket_strerror(socket_last_error($this->sock)));
 			} else {
 				$this->log( "Bound" );
 			}
 		}
+		socket_set_nonblock($this->sock); 
 		// Socket settings
 		socket_set_option($this->sock, SOL_SOCKET, SO_SNDTIMEO, array('sec' => $this->timeout_sec, 'usec' => 0));
 		socket_set_option($this->sock, SOL_SOCKET, SO_RCVTIMEO, array('sec' => $this->timeout_sec, 'usec' => 0));
+		$error = null;
+		$attempts = 0;
 		// Connect the socket
-		$result = @socket_connect($this->sock, $this->host, $this->port);
-		if ($result === false) {
-		    $this->connected = false;
-			throw new Exception("socket_connect() failed.</br>Reason: ($result)" .
-				socket_strerror(socket_last_error($this->sock)));
-		} else {
-			$this->log( "Connected" );
-            $this->connected = true;
-			return true;
+		while( !($result = @socket_connect($this->sock, $this->host, $this->port)) && $attempts++ < $this->timeout_sec*1000) {
+			$error = socket_last_error();
+			if($error == SOCKET_EISCONN) {
+				$this->log( "Connected" );
+	            $this->connected = true;
+	            socket_set_block($this->sock);
+				return true;
+			}
+			if($error != SOCKET_EINPROGRESS && $error != SOCKET_EALREADY) {
+				socket_close($this->sock);
+				throw new Exception("Error connecting (attempt $attempts) Socket: ($error) ".socket_strerror($error));
+			}
+			usleep(1000);
+
 		}
+
+	    $this->connected = false;
+		throw new Exception("socket_connect() failed.\nTimeout or Reason: " .
+			socket_strerror(socket_last_error($this->sock)));
 	}
 
 	/**

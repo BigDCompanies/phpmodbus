@@ -151,7 +151,7 @@ class ModbusMaster
 		while( !($result = @socket_connect($this->sock, $this->host, $this->port)) && $attempts++ < $this->timeout_sec*1000) {
 			$error = socket_last_error();
 			if($error == SOCKET_EISCONN) {
-				$this->log( "Connected" );
+				$this->log( "Connected Mac Method" );
 	            $this->connected = true;
 	            socket_set_block($this->sock);
 				return true;
@@ -164,8 +164,15 @@ class ModbusMaster
 
 		}
 
+		if($result !== false) {
+			$this->log("Connected Linux Method");
+	        $this->connected = true;
+	        socket_set_block($this->sock);
+	        return true;
+		}
+
 	    $this->connected = false;
-		throw new Exception("socket_connect() failed.\nTimeout or Reason: " .
+		throw new Exception("socket_connect() failed.\nTimeout or Reason: (".socket_last_error($this->sock).")" .
 			socket_strerror(socket_last_error($this->sock)));
 	}
 

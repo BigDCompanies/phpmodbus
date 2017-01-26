@@ -41,12 +41,12 @@ class PhpType
 	 * @param bool  $bigEndian
 	 * @return float
 	 */
-	public static function bytes2float($values, $bigEndian = 0)
+	public static function bytes2float($values, $bigEndian = 0, $reverseWords = 1)
 	{
 		// Set the array to correct form
 		$data = self::checkData($values);
 		// Combine bytes
-		$real = self::combineBytes($data, $bigEndian);
+		$real = self::combineBytes($data, $bigEndian, $reverseWords);
 		// Convert the real value to float
 		return (float)self::real2float($real);
 	}
@@ -61,14 +61,14 @@ class PhpType
 	 * @param bool  $bigEndian
 	 * @return int
 	 */
-	public static function bytes2signedInt($values, $bigEndian = 0)
+	public static function bytes2signedInt($values, $bigEndian = 0, $reverseWords = 1)
 	{
 		$data = array();
 		$int = 0;
 		// Set the array to correct form
 		$data = self::checkData($values);
 		// Combine bytes
-		$int = self::combineBytes($data, $bigEndian);
+		$int = self::combineBytes($data, $bigEndian, $reverseWords);
 		// In the case of signed 2 byte value convert it to 4 byte one
 		if ((count($values) == 2) && ((0x8000 & $int) > 0)) {
 			$int = 0xFFFF8000 | $int;
@@ -87,14 +87,14 @@ class PhpType
 	 * @param bool  $bigEndian
 	 * @return int|float
 	 */
-	public static function bytes2unsignedInt($values, $bigEndian = 0)
+	public static function bytes2unsignedInt($values, $bigEndian = 0, $reverseWords = 1)
 	{
 		$data = array();
 		$int = 0;
 		// Set the array to correct form
 		$data = self::checkData($values);
 		// Combine bytes
-		$int = self::combineBytes($data, $bigEndian);
+		$int = self::combineBytes($data, $bigEndian, $reverseWords);
 		// Convert the value
 		return self::dword2unsignedInt($int);
 	}
@@ -109,7 +109,7 @@ class PhpType
 	 * @param bool  $bigEndian
 	 * @return string
 	 */
-	public static function bytes2string($values, $bigEndian = 0)
+	public static function bytes2string($values, $bigEndian = 0, $reverseWords = 1)
 	{
 		// Prepare string variable
 		$str = "";
@@ -245,20 +245,34 @@ class PhpType
 	 * @param bool $bigEndian
 	 * @return int
 	 */
-	private static function combineBytes($data, $bigEndian)
+	private static function combineBytes($data, $bigEndian, $reverseWords = 1)
 	{
 		$value = 0;
 		// Combine bytes
-		if ($bigEndian == 0) {
-			$value = (($data[3] & 0xFF) << 16) |
-				(($data[2] & 0xFF) << 24) |
-				(($data[1] & 0xFF)) |
-				(($data[0] & 0xFF) << 8);
+		if($reverseWords) {
+			if ($bigEndian == 0) {
+				$value = (($data[3] & 0xFF) << 16) |
+					(($data[2] & 0xFF) << 24) |
+					(($data[1] & 0xFF)) |
+					(($data[0] & 0xFF) << 8);
+			} else {
+				$value = (($data[3] & 0xFF) << 24) |
+					(($data[2] & 0xFF) << 16) |
+					(($data[1] & 0xFF) << 8) |
+					(($data[0] & 0xFF));
+			}
 		} else {
-			$value = (($data[3] & 0xFF) << 24) |
-				(($data[2] & 0xFF) << 16) |
-				(($data[1] & 0xFF) << 8) |
-				(($data[0] & 0xFF));
+			if ($bigEndian == 0) {
+				$value = (($data[3] & 0xFF)) |
+					(($data[2] & 0xFF) << 8) |
+					(($data[1] & 0xFF) << 16) |
+					(($data[0] & 0xFF) << 24);
+			} else {
+				$value = (($data[3] & 0xFF) << 8) |
+					(($data[2] & 0xFF)) |
+					(($data[1] & 0xFF) << 24) |
+					(($data[0] & 0xFF) << 16);
+			}
 		}
 
 		return $value;

@@ -61,7 +61,7 @@ class ModbusMaster
 
 	public $endianness = 0; // Endianness codding (little endian == 0, big endian == 1)
 
-	public $socket_protocol = "UDP"; // Socket protocol (TCP, UDP)
+	public $socket_protocol = "UDP"; // Socket protocol (TCP, UDP, RTU_TCP)
 
 	public $debug = false;
 
@@ -80,13 +80,14 @@ class ModbusMaster
      */
     private $last_request = 0;
 
+
 	/**
 	 * ModbusMaster
 	 *
 	 * This is the constructor that defines {@link $host} IP address of the object.
 	 *
 	 * @param String $host     An IP address of a Modbus TCP device. E.g. "192.168.1.1"
-	 * @param String $protocol Socket protocol (TCP, UDP)
+	 * @param String $protocol Socket protocol (TCP, UDP, RTU_TCP)
 	 * @param Integer $port    Port number
 	 */
 	public function __construct($host, $protocol="UDP", $port=502)
@@ -122,7 +123,7 @@ class ModbusMaster
 	public function connect()
 	{
 		// Create a protocol specific socket
-		if ($this->socket_protocol == "TCP") {
+		if ($this->socket_protocol == "TCP" || $this->socket_protocol == "RTU_TCP") {
 			// TCP socket
 			$this->sock = socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
 		} elseif ($this->socket_protocol == "UDP") {
@@ -204,6 +205,14 @@ class ModbusMaster
 			$this->log( "Request too fast, sleeping for $delay");
 			usleep($delay);
 		}
+		if($this->socket_protocol == "RTU_TCP") {
+			// Trim TCP ADU
+			$packet = substr($packet, 6);
+			// LOOKUP AND APPEND CRC
+			$append = $this->crc16($packet);
+			$packet = $packet.$append;
+		}
+		$this->log( "Really Sending This Packet: ".$this->printPacket($packet) );
 		socket_write($this->sock, $packet, strlen($packet));
 		$this->log( "Send" );
 		$this->last_request = microtime(true);
@@ -231,6 +240,22 @@ class ModbusMaster
 				//$this->log( "Try Read Data" );
 				while (@socket_recv($this->sock, $rec, 2000, 0)) {
 					$this->log( "Data received" );
+					if($this->socket_protocol == "RTU_TCP") {
+						// CHECK CRC, return null if bad CRC!
+						$calc_crc = $this->crc16(substr($rec,0,-2));
+						$rec_crc = substr($rec, -2);
+						if($calc_crc != $rec_crc) {
+							$this->log("Received CRC and Calc CRC do not match!");
+							return null;
+						}
+						// TRIM RTU CRC, ADD DUMMY TCP ADU
+						$packet = substr($rec,0,-2);
+						$buffer3 = '';
+						$buffer3 .= IecType::iecINT(rand(0, 65000));   // dummy transaction ID
+						$buffer3 .= IecType::iecINT(0);               // protocol ID
+						$buffer3 .= IecType::iecINT(strlen($packet));    // length
+						return $buffer3.$packet;
+					}
 					return $rec;
 				}
 				$lastAccess = time();
@@ -1445,4 +1470,27 @@ class ModbusMaster
 		$this->status .= $txt."\n";
 		if($this->debug) echo date( DATE_RFC822 ). " - $txt\n";
 	}
+
+	public function crc16($data)
+	{
+		$crc = 0xFFFF;
+		for ($i = 0; $i < strlen($data); $i++)
+		{
+			$crc ^=ord($data[$i]);
+     		for ($j = 8; $j !=0; $j--)
+			{
+				if (($crc & 0x0001) !=0)
+				{
+					$crc >>= 1;
+					$crc ^= 0xA001;
+				}
+				else
+				$crc >>= 1;
+			}		
+		}
+		$highCrc=floor($crc/256);
+		$lowCrc=($crc-$highCrc*256);
+		return chr($lowCrc).chr($highCrc);
+	}
+
 }

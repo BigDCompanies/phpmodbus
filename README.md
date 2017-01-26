@@ -1,12 +1,12 @@
 # phpmodbus
 
-Implementation of the basic functionality of the Modbus TCP and UDP based protocol using PHP. 
+Implementation of the basic functionality of the Modbus TCP, UDP and a hack of RTU over TCP based protocol using PHP. 
 
 This is a fork of the original project at https://code.google.com/p/phpmodbus/
 
 > **What's new**
-> 
-> This fork adds a namespace and fixes issues encountered when porting to PHP 7
+> This fork adds support for running on Mac or Linux (Ubuntu 16.04 only tested), and a completely not proper method for communicating with RTU over TCP devices. (I just hacked off the TCP specific ADU and added the CRC 16 when sending, and check the CRC 16 when receiving, then tack on the TCP specific ADU. )
+> Previous fork adds a namespace and fixes issues encountered when porting to PHP 7
 > If the ModbusMaster is already connected, all read/write operations will use the open socket and not open/close a new connection.
 
 **WARNING: Everything except the actual code in this repo may be broken and outdated.**

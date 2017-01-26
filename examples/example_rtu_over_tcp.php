@@ -5,7 +5,7 @@ require_once dirname(__FILE__) . '/../src/IecType.php';
 use PHPModbus\ModbusMaster;
 
 // Create Modbus object
-$modbus = new ModbusMaster("10.0.0.101", "TCP", 502);
+$modbus = new ModbusMaster("10.0.0.10", "RTU_TCP", 9503);
 $modbus->debug = true;
 $modbus->request_delay = 0.25;
 $modbus->connect();
@@ -13,7 +13,7 @@ $modbus->connect();
 while(1) {
 
     try {
-        $recData = $modbus->readInputDiscretes(0, 16, 8);
+        $recData = $modbus->fc3(1, 7020, 2);
     }
     catch (Exception $e) {
         // Print error information if any
@@ -27,18 +27,5 @@ while(1) {
     var_dump($recData); 
     echo "</br>";
 
-    try {
-        $recData = $modbus->readCoils(0, 0, 1);
-    }
-    catch (Exception $e) {
-        // Print error information if any
-        echo $modbus;
-        echo $e;
-        exit;
-    }
-
-    // Print read data
-    echo "</br>Data:</br>";
-    var_dump($recData); 
-    echo "</br>";
+    sleep(3);
 }

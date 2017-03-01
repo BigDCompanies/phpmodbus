@@ -68,7 +68,7 @@ class PhpType
 		// Set the array to correct form
 		$data = self::checkData($values);
 		// Combine bytes
-		$int = self::combineBytes($data, $bigEndian, $reverseWords);
+		$int = self::combineBytes($data, $bigEndian, (count($values)==2 ? 1 : $reverseWords));
 		// In the case of signed 2 byte value convert it to 4 byte one
 		if ((count($values) == 2) && ((0x8000 & $int) > 0)) {
 			$int = 0xFFFF8000 | $int;
@@ -94,7 +94,7 @@ class PhpType
 		// Set the array to correct form
 		$data = self::checkData($values);
 		// Combine bytes
-		$int = self::combineBytes($data, $bigEndian, $reverseWords);
+		$int = self::combineBytes($data, $bigEndian, (count($values)==2 ? 1 : $reverseWords));
 		// Convert the value
 		return self::dword2unsignedInt($int);
 	}

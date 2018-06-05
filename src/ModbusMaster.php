@@ -68,7 +68,7 @@ class ModbusMaster
     /**
      * @var float $request_delay seconds to delay (or fraction there of) between requests. Needed for some older controllers.
      */
-	public $request_delay = 0;  
+	public $request_delay = 0;
 
     /**
      * @var bool true if socket is connected
@@ -142,7 +142,7 @@ class ModbusMaster
 				$this->log( "Bound" );
 			}
 		}
-		socket_set_nonblock($this->sock); 
+		socket_set_nonblock($this->sock);
 		// Socket settings
 		socket_set_option($this->sock, SOL_SOCKET, SO_SNDTIMEO, array('sec' => $this->timeout_sec, 'usec' => 0));
 		socket_set_option($this->sock, SOL_SOCKET, SO_RCVTIMEO, array('sec' => $this->timeout_sec, 'usec' => 0));
@@ -228,6 +228,9 @@ class ModbusMaster
 	 */
 	private function rec()
 	{
+		if($this->socket_protocol == "RTU_TCP") {
+			usleep(250000);
+		}
 		socket_set_nonblock($this->sock);
 		$readsocks[] = $this->sock;
 		$writesocks = null;
@@ -868,7 +871,7 @@ class ModbusMaster
         if (!$alreadyConnected) $this->connect();
 		// send FC6
 		$packet = $this->writeSingleRegisterPacketBuilder($unitId, $reference, $data);
-		$this->log( $this->printPacket($packet) ); 
+		$this->log( $this->printPacket($packet) );
 		$this->send($packet);
 		// receive response
 		$rpacket = $this->rec();
@@ -1465,7 +1468,7 @@ class ModbusMaster
 		return $str;
 	}
 
-	private function log($txt) 
+	private function log($txt)
 	{
 		$this->status .= $txt."\n";
 		if($this->debug) echo date( DATE_RFC822 ). " - $txt\n";
@@ -1486,7 +1489,7 @@ class ModbusMaster
 				}
 				else
 				$crc >>= 1;
-			}		
+			}
 		}
 		$highCrc=floor($crc/256);
 		$lowCrc=($crc-$highCrc*256);

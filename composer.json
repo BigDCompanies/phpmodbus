@@ -1,5 +1,5 @@
 {
-  "name": "serich159/phpmodbus",
+  "name": "bigdcompanies/phpmodbus",
   "keywords": ["phpmodbus","modbus"],
   "description": "PhpModbus with namespaces and updated to PHP 7",
   "license": "LGPL",

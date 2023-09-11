@@ -73,10 +73,10 @@ class PhpTypeTest extends TestCase
     #[TestWith([[0xF5, 0xC3, 0x40, 0x48], 3.14, 0.01, false, true])]
     #[TestWith([[0xC3, 0xF5, 0x48, 0x40], 3.14, 0.01, true, false])]
     #[TestWith([[0x48, 0x40, 0xC3, 0xF5], 3.14, 0.01, true, true])]
-    #[TestWith([[0x3F, 0x9E, 0x04, 0x0F], 1.2345679, 0.01, false, false])]
-    #[TestWith([[0x04, 0x0F, 0x3F, 0x9E], 1.2345679, 0.01, false, true])]
-    #[TestWith([[0x0F, 0x04, 0x9E, 0x3F], 1.2345679, 0.01, true, false])]
-    #[TestWith([[0x9E, 0x3F, 0x0F, 0x04], 1.2345679, 0.01, true, true])]
+    #[TestWith([[0x3F, 0x9E, 0x04, 0x0F], 1.2345679, 0.0001, false, false])]
+    #[TestWith([[0x04, 0x0F, 0x3F, 0x9E], 1.2345679, 0.0001, false, true])]
+    #[TestWith([[0x0F, 0x04, 0x9E, 0x3F], 1.2345679, 0.0001, true, false])]
+    #[TestWith([[0x9E, 0x3F, 0x0F, 0x04], 1.2345679, 0.0001, true, true])]
     public function should_parse_floats(
         array $inputBytes,
         float $expectedNumber,
@@ -90,7 +90,16 @@ class PhpTypeTest extends TestCase
             reverseWords: $reversedWords
         );
 
-        $abs = abs($expectedNumber - $output);
-        $this->assertTrue($abs < $precision, "$abs is not within $precision from 0");
+        /**
+         * We assert if the output is within a range due to IEEE 754 floating point precision rounding issues.
+         * Interpreting a byte array as a float will not always result in the exact same number.
+         */
+        $lowerBound = $expectedNumber - $precision;
+        $upperBound = $expectedNumber + $precision;
+
+        $this->assertTrue(
+            condition: $output >= $lowerBound && $output <= $upperBound,
+            message: "Value: $output\nExpected: $expectedNumber\n\nExpected to be within range: [$lowerBound, $upperBound]"
+        );
     }
 }

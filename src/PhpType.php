@@ -241,8 +241,9 @@ class PhpType
 	 *
 	 * Combine bytes together
 	 *
-	 * @param int  $data
-	 * @param bool $bigEndian
+	 * @param array  $data
+	 * @param bool $reverseBytes
+     * @param bool $reverseWords
 	 * @return int
 	 */
     private static function combineBytes($data, $reverseBytes, $reverseWords = 1)

@@ -5,7 +5,7 @@ use PHPUnit\Framework\Attributes\Test;
 use PHPUnit\Framework\Attributes\TestWith;
 use PHPUnit\Framework\TestCase;
 
-class PhpTypeTests extends TestCase
+class PhpTypeTest extends TestCase
 {
     #[Test]
     #[TestWith([[0, 0, 0, 1], 1, false, false])] // Big endian

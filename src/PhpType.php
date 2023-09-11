@@ -241,40 +241,42 @@ class PhpType
 	 *
 	 * Combine bytes together
 	 *
-	 * @param int  $data
-	 * @param bool $bigEndian
+	 * @param array  $data
+	 * @param bool $reverseBytes
+     * @param bool $reverseWords
 	 * @return int
 	 */
-	private static function combineBytes($data, $bigEndian, $reverseWords = 1)
-	{
-		$value = 0;
-		// Combine bytes
-		if($reverseWords) {
-			if ($bigEndian == 0) {
-				$value = (($data[3] & 0xFF) << 16) |
-					(($data[2] & 0xFF) << 24) |
-					(($data[1] & 0xFF)) |
-					(($data[0] & 0xFF) << 8);
-			} else {
-				$value = (($data[3] & 0xFF) << 24) |
-					(($data[2] & 0xFF) << 16) |
-					(($data[1] & 0xFF) << 8) |
-					(($data[0] & 0xFF));
-			}
-		} else {
-			if ($bigEndian == 0) {
-				$value = (($data[3] & 0xFF)) |
-					(($data[2] & 0xFF) << 8) |
-					(($data[1] & 0xFF) << 16) |
-					(($data[0] & 0xFF) << 24);
-			} else {
-				$value = (($data[3] & 0xFF) << 8) |
-					(($data[2] & 0xFF)) |
-					(($data[1] & 0xFF) << 24) |
-					(($data[0] & 0xFF) << 16);
-			}
-		}
+    private static function combineBytes($data, $reverseBytes, $reverseWords = 1)
+    {
+        // Combine bytes
+        if ($reverseWords) {
+            if ($reverseBytes == 0) {
+                return
+                    ($data[2] & 0xFF) << 24 |
+                    ($data[3] & 0xFF) << 16 |
+                    ($data[0] & 0xFF) << 8 |
+                    ($data[1] & 0xFF);
+            } else {
+                return
+                    ($data[1] & 0xFF) << 24 |
+                    ($data[0] & 0xFF) << 16 |
+                    ($data[3] & 0xFF) << 8 |
+                    ($data[2] & 0xFF);
+            }
+        }
 
-		return $value;
-	}
+        if ($reverseBytes == 0) {
+            return
+                ($data[0] & 0xFF) << 24 |
+                ($data[1] & 0xFF) << 16 |
+                ($data[2] & 0xFF) << 8 |
+                ($data[3] & 0xFF);
+        } else {
+            return
+                ($data[3] & 0xFF) << 24 |
+                ($data[2] & 0xFF) << 16 |
+                ($data[1] & 0xFF) << 8 |
+                ($data[0] & 0xFF);
+        }
+    }
 }

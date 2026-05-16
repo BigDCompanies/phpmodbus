@@ -80,6 +80,11 @@ class ModbusMaster
      */
     private $last_request = 0;
 
+    /**
+     * @var string|null last sent Modbus TCP/UDP transaction ID
+     */
+    private $transactionId = null;
+
 
 	/**
 	 * ModbusMaster
@@ -205,7 +210,9 @@ class ModbusMaster
 			$this->log( "Request too fast, sleeping for $delay");
 			usleep($delay);
 		}
+		$this->transactionId = substr($packet, 0, 2);
 		if($this->socket_protocol == "RTU_TCP") {
+			$this->transactionId = null;
 			// Trim TCP ADU
 			$packet = substr($packet, 6);
 			// LOOKUP AND APPEND CRC
@@ -258,6 +265,9 @@ class ModbusMaster
 						$buffer3 .= IecType::iecINT(0);               // protocol ID
 						$buffer3 .= IecType::iecINT(strlen($packet));    // length
 						return $buffer3.$packet;
+					}
+					if($this->transactionId !== null && substr($rec, 0, 2) !== $this->transactionId) {
+						throw new Exception("Modbus transaction ID mismatch");
 					}
 					return $rec;
 				}

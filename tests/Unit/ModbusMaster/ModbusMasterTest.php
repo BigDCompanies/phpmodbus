@@ -122,6 +122,8 @@ function connectedModbusMaster()
 
 function modbusMasterMethod(ModbusMaster $master, string $methodName)
 {
+    // These tests exercise private ModbusMaster behavior directly so production
+    // visibility does not need to be widened just to support test assertions.
     $reflection = new \ReflectionClass($master);
     $method = $reflection->getMethod($methodName);
     $method->setAccessible(true);

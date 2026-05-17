@@ -44,7 +44,7 @@ use Psr\Log\LoggerInterface;
  * @package    Phpmodbus
  *
  */
-class ModbusMaster
+class ModbusMaster implements ModbusMasterInterface
 {
 	const MODBUS_MBAP_HEADER_LENGTH = 7;
 	const MODBUS_TCP_MAX_ADU_LENGTH = 260;

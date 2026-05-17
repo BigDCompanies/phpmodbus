@@ -127,59 +127,44 @@ class ModbusMaster
 	 */
 	public function connect()
 	{
-		// Create a protocol specific socket
 		if ($this->socket_protocol == "TCP" || $this->socket_protocol == "RTU_TCP") {
-			// TCP socket
-			$this->sock = socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
+			$transport = 'tcp';
 		} elseif ($this->socket_protocol == "UDP") {
-			// UDP socket
-			$this->sock = socket_create(AF_INET, SOCK_DGRAM, SOL_UDP);
+			$transport = 'udp';
 		} else {
 			throw new Exception("Unknown socket protocol, should be 'TCP' or 'UDP'");
 		}
-		// Bind the client socket to a specific local port
+
+		$contextOptions = array();
 		if (strlen($this->client) > 0) {
-			$result = socket_bind($this->sock, $this->client, $this->client_port);
-			if ($result === false) {
-				throw new Exception("socket_bind() failed.\nReason: ($result)" .
-					socket_strerror(socket_last_error($this->sock)));
-			} else {
-				$this->log( "Bound" );
-			}
-		}
-		socket_set_nonblock($this->sock);
-		// Socket settings
-		socket_set_option($this->sock, SOL_SOCKET, SO_SNDTIMEO, array('sec' => $this->timeout_sec, 'usec' => 0));
-		socket_set_option($this->sock, SOL_SOCKET, SO_RCVTIMEO, array('sec' => $this->timeout_sec, 'usec' => 0));
-		$error = null;
-		$attempts = 0;
-		// Connect the socket
-		while( !($result = @socket_connect($this->sock, $this->host, $this->port)) && $attempts++ < $this->timeout_sec*1000) {
-			$error = socket_last_error();
-			if($error == SOCKET_EISCONN) {
-				$this->log( "Connected Mac Method" );
-	            $this->connected = true;
-	            socket_set_block($this->sock);
-				return true;
-			}
-			if($error != SOCKET_EINPROGRESS && $error != SOCKET_EALREADY) {
-				socket_close($this->sock);
-				throw new Exception("Error connecting (attempt $attempts) Socket: ($error) ".socket_strerror($error));
-			}
-			usleep(1000);
-
+			$contextOptions['socket'] = array(
+				'bindto' => $this->client . ':' . $this->client_port,
+			);
+			$this->log( "Bound" );
 		}
 
-		if($result !== false) {
-			$this->log("Connected Linux Method");
-	        $this->connected = true;
-	        socket_set_block($this->sock);
-	        return true;
+		$errorCode = 0;
+		$errorMessage = '';
+		$context = stream_context_create($contextOptions);
+		$this->sock = @stream_socket_client(
+            "$transport://$this->host:$this->port",
+			$errorCode,
+			$errorMessage,
+			$this->timeout_sec,
+			STREAM_CLIENT_CONNECT,
+			$context
+		);
+
+		if($this->sock === false) {
+			$this->connected = false;
+			throw new Exception("stream_socket_client() failed.\nReason: ($errorCode) $errorMessage");
 		}
 
-	    $this->connected = false;
-		throw new Exception("socket_connect() failed.\nTimeout or Reason: (".socket_last_error($this->sock).")" .
-			socket_strerror(socket_last_error($this->sock)));
+		stream_set_timeout($this->sock, $this->timeout_sec);
+		$this->connected = true;
+		$this->log("Connected");
+
+		return true;
 	}
 
 	/**
@@ -190,7 +175,7 @@ class ModbusMaster
 	public function disconnect()
 	{
 		if($this->connected) {
-			socket_close($this->sock);
+			fclose($this->sock);
 	        $this->connected = false;
 			$this->log( "Disconnected" );
 		}
@@ -220,7 +205,7 @@ class ModbusMaster
 			$packet = $packet.$append;
 		}
 		$this->log( "Really Sending This Packet: ".$this->printPacket($packet) );
-		socket_write($this->sock, $packet, strlen($packet));
+		fwrite($this->sock, $packet, strlen($packet));
 		$this->log( "Send" );
 		$this->last_request = microtime(true);
 	}
@@ -238,51 +223,42 @@ class ModbusMaster
 		if($this->socket_protocol == "RTU_TCP") {
 			usleep(250000);
 		}
-		socket_set_nonblock($this->sock);
-		$readsocks[] = $this->sock;
-		$writesocks = null;
-		$exceptsocks = null;
 		$rec = "";
-		$lastAccess = time();
-		while (socket_select($readsocks, $writesocks, $exceptsocks, 0, 300000) !== false) {
-			//$this->log( "Wait data ... " );
-			if (in_array($this->sock, $readsocks)) {
-				//$this->log( "Try Read Data" );
-				while (@socket_recv($this->sock, $rec, 2000, 0)) {
-					$this->log( "Data received" );
-					if($this->socket_protocol == "RTU_TCP") {
-						// CHECK CRC, return null if bad CRC!
-						$calc_crc = $this->crc16(substr($rec,0,-2));
-						$rec_crc = substr($rec, -2);
-						if($calc_crc != $rec_crc) {
-							$this->log("Received CRC and Calc CRC do not match!");
-							return null;
-						}
-						// TRIM RTU CRC, ADD DUMMY TCP ADU
-						$packet = substr($rec,0,-2);
-						$buffer3 = '';
-						$buffer3 .= IecType::iecINT(rand(0, 65000));   // dummy transaction ID
-						$buffer3 .= IecType::iecINT(0);               // protocol ID
-						$buffer3 .= IecType::iecINT(strlen($packet));    // length
-						return $buffer3.$packet;
-					}
-					if($this->transactionId !== null && substr($rec, 0, 2) !== $this->transactionId) {
-						throw new Exception("Modbus transaction ID mismatch");
-					}
-					return $rec;
-				}
-				$lastAccess = time();
-			} else {
-				if (time() - $lastAccess >= $this->timeout_sec) {
-					throw new Exception("Watchdog time expired [ " .
-						$this->timeout_sec . " sec]!!! Connection to " .
-						$this->host . " is not established.");
-				}
+		stream_set_timeout($this->sock, $this->timeout_sec);
+		$rec = fread($this->sock, 2000);
+
+		if($rec === false || $rec === '') {
+			$meta = stream_get_meta_data($this->sock);
+			if(isset($meta['timed_out']) && $meta['timed_out']) {
+				throw new Exception(
+					"Watchdog time expired[ $this->timeout_sec sec ]!!! Connection to $this->host is not established"
+				);
 			}
-			$readsocks[] = $this->sock;
+
+			return null;
 		}
-		$this->last_request = microtime(true);
-		return null;
+
+		$this->log( "Data received" );
+		if($this->socket_protocol == "RTU_TCP") {
+			// CHECK CRC, return null if bad CRC!
+			$calc_crc = $this->crc16(substr($rec,0,-2));
+			$rec_crc = substr($rec, -2);
+			if($calc_crc != $rec_crc) {
+				$this->log("Received CRC and Calc CRC do not match!");
+				return null;
+			}
+			// TRIM RTU CRC, ADD DUMMY TCP ADU
+			$packet = substr($rec,0,-2);
+			$buffer3 = '';
+			$buffer3 .= IecType::iecINT(rand(0, 65000));   // dummy transaction ID
+			$buffer3 .= IecType::iecINT(0);               // protocol ID
+			$buffer3 .= IecType::iecINT(strlen($packet));    // length
+			return $buffer3.$packet;
+		}
+		if($this->transactionId !== null && substr($rec, 0, 2) !== $this->transactionId) {
+			throw new Exception("Modbus transaction ID mismatch");
+		}
+		return $rec;
 	}
 
 	/**

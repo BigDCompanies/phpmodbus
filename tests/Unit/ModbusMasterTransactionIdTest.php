@@ -7,12 +7,27 @@ namespace Tests\Unit {
     {
         public static $writtenPacket = '';
 
+        public static $writtenPackets = [];
+
         public static $responseTransactionId = '';
+
+        public static $readResults = [];
+
+        public static $readCalls = 0;
+
+        public static $timedOut = false;
+
+        public static $receivedTransactionIds = [];
 
         public static function reset()
         {
             self::$writtenPacket = '';
+            self::$writtenPackets = [];
             self::$responseTransactionId = '';
+            self::$readResults = [];
+            self::$readCalls = 0;
+            self::$timedOut = false;
+            self::$receivedTransactionIds = [];
         }
     }
 
@@ -43,6 +58,29 @@ namespace Tests\Unit {
         $data = $master->readCoils(1, 0, 1);
 
         $this->assertSame([true], $data);
+    });
+
+    it('throws when the stream read times out', function () {
+        $master = connectedModbusMaster();
+        ModbusMasterSocketFake::$readResults = [''];
+        ModbusMasterSocketFake::$timedOut = true;
+
+        $master->readCoils(1, 0, 1);
+    })->throws(\Exception::class, 'Watchdog time expired');
+
+    it('matches transaction IDs across consecutive requests', function () {
+        $master = connectedModbusMaster();
+        ModbusMasterSocketFake::$responseTransactionId = 'match-request';
+
+        $first = $master->readCoils(1, 0, 1);
+        $second = $master->readCoils(1, 0, 1);
+
+        $this->assertSame([true], $first);
+        $this->assertSame([true], $second);
+        $this->assertSame([
+            substr(ModbusMasterSocketFake::$writtenPackets[0], 0, 2),
+            substr(ModbusMasterSocketFake::$writtenPackets[1], 0, 2),
+        ], ModbusMasterSocketFake::$receivedTransactionIds);
     });
 
     function buildReadCoilsRequestPacket()
@@ -77,30 +115,37 @@ namespace Tests\Unit {
 namespace PHPModbus {
     use Tests\Unit\ModbusMasterSocketFake;
 
-    function socket_write($socket, $packet, $length)
+    function fwrite($stream, $packet, $length = null)
     {
         ModbusMasterSocketFake::$writtenPacket = $packet;
+        ModbusMasterSocketFake::$writtenPackets[] = $packet;
 
-        return $length;
+        return $length === null ? strlen($packet) : $length;
     }
 
-    function socket_set_nonblock($socket)
+    function stream_set_timeout($stream, $seconds, $microseconds = 0)
     {
         return true;
     }
 
-    function socket_select(&$readsocks, &$writesocks, &$exceptsocks, $seconds, $microseconds = 0)
+    function stream_get_meta_data($stream)
     {
-        return 1;
+        return ['timed_out' => ModbusMasterSocketFake::$timedOut];
     }
 
-    function socket_close($socket)
+    function fclose($stream)
     {
-        return null;
+        return true;
     }
 
-    function socket_recv($socket, &$buffer, $length, $flags)
+    function fread($stream, $length)
     {
+        ModbusMasterSocketFake::$readCalls++;
+
+        if (ModbusMasterSocketFake::$readResults) {
+            return array_shift(ModbusMasterSocketFake::$readResults);
+        }
+
         $transactionId = ModbusMasterSocketFake::$responseTransactionId;
 
         if ($transactionId === 'match-request') {
@@ -113,8 +158,8 @@ namespace PHPModbus {
                 : "\x12\x34";
         }
 
-        $buffer = $transactionId . "\x00\x00\x00\x04\x01\x01\x01\x01";
+        ModbusMasterSocketFake::$receivedTransactionIds[] = $transactionId;
 
-        return strlen($buffer);
+        return $transactionId . "\x00\x00\x00\x04\x01\x01\x01\x01";
     }
 }

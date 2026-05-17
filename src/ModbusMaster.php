@@ -45,6 +45,10 @@ use Exception;
  */
 class ModbusMaster
 {
+	const MODBUS_MBAP_HEADER_LENGTH = 7;
+	const MODBUS_TCP_MAX_ADU_LENGTH = 260;
+	const MODBUS_RTU_MAX_ADU_LENGTH = 256;
+
 	private $sock;
 
 	public $host = "192.168.1.1";
@@ -223,18 +227,16 @@ class ModbusMaster
 		if($this->socket_protocol == "RTU_TCP") {
 			usleep(250000);
 		}
-		$rec = "";
 		stream_set_timeout($this->sock, $this->timeout_sec);
-		$rec = fread($this->sock, 2000);
+		if($this->socket_protocol == "TCP") {
+			$rec = $this->readTcpResponse();
+		} elseif($this->socket_protocol == "UDP") {
+			$rec = $this->readSocket(self::MODBUS_TCP_MAX_ADU_LENGTH);
+		} else {
+			$rec = $this->readSocket(self::MODBUS_RTU_MAX_ADU_LENGTH);
+		}
 
-		if($rec === false || $rec === '') {
-			$meta = stream_get_meta_data($this->sock);
-			if(isset($meta['timed_out']) && $meta['timed_out']) {
-				throw new Exception(
-					"Watchdog time expired[ $this->timeout_sec sec ]!!! Connection to $this->host is not established"
-				);
-			}
-
+		if($rec === '') {
 			return null;
 		}
 
@@ -258,6 +260,75 @@ class ModbusMaster
 		if($this->transactionId !== null && substr($rec, 0, 2) !== $this->transactionId) {
 			throw new Exception("Modbus transaction ID mismatch");
 		}
+		return $rec;
+	}
+
+	/**
+	 * Read a Modbus TCP response using the MBAP length field.
+	 *
+	 * @return string
+	 * @throws Exception
+	 */
+	private function readTcpResponse()
+	{
+		$header = $this->readSocket(self::MODBUS_MBAP_HEADER_LENGTH, true);
+		if($header === '') {
+			return '';
+		}
+
+		$length = unpack('n', substr($header, 4, 2))[1];
+		if($length < 1 || $length > self::MODBUS_TCP_MAX_ADU_LENGTH - 6) {
+			throw new Exception("Modbus response length is invalid");
+		}
+
+		$frame = $length > 1 ? $this->readSocket($length - 1, true) : '';
+
+		return $header.$frame;
+	}
+
+	/**
+	 * @param int $length
+	 * @param bool $exact
+	 * @return string
+	 * @throws Exception
+	 */
+	private function readSocket($length, $exact = false)
+	{
+		$rec = '';
+		while(strlen($rec) < $length) {
+			$chunk = fread($this->sock, $length - strlen($rec));
+			if($chunk === false || $chunk === '') {
+				if($rec !== '') {
+					throw new Exception("Modbus response data frame is incomplete");
+				}
+
+				$meta = stream_get_meta_data($this->sock);
+				if(isset($meta['timed_out']) && $meta['timed_out']) {
+					throw new Exception(
+						"Watchdog time expired[ $this->timeout_sec sec ]!!! Connection to $this->host is not established"
+					);
+				}
+
+				return '';
+			}
+
+			$rec .= $chunk;
+			if(!$exact) {
+				break;
+			}
+		}
+
+		if($exact && strlen($rec) < $length) {
+			$meta = stream_get_meta_data($this->sock);
+			if(isset($meta['timed_out']) && $meta['timed_out']) {
+				throw new Exception(
+					"Watchdog time expired[ $this->timeout_sec sec ]!!! Connection to $this->host is not established"
+				);
+			}
+
+			throw new Exception("Modbus response data frame is incomplete");
+		}
+
 		return $rec;
 	}
 

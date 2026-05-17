@@ -15,6 +15,10 @@ namespace Tests\Unit {
 
         public static $readCalls = 0;
 
+        public static $readLengths = [];
+
+        public static $readBuffer = '';
+
         public static $timedOut = false;
 
         public static $receivedTransactionIds = [];
@@ -26,6 +30,8 @@ namespace Tests\Unit {
             self::$responseTransactionId = '';
             self::$readResults = [];
             self::$readCalls = 0;
+            self::$readLengths = [];
+            self::$readBuffer = '';
             self::$timedOut = false;
             self::$receivedTransactionIds = [];
         }
@@ -81,6 +87,15 @@ namespace Tests\Unit {
             substr(ModbusMasterSocketFake::$writtenPackets[0], 0, 2),
             substr(ModbusMasterSocketFake::$writtenPackets[1], 0, 2),
         ], ModbusMasterSocketFake::$receivedTransactionIds);
+    });
+
+    it('reads TCP responses using the MBAP header length', function () {
+        $master = connectedModbusMaster();
+        ModbusMasterSocketFake::$responseTransactionId = 'match-request';
+
+        $master->readCoils(1, 0, 1);
+
+        $this->assertSame([7, 3], ModbusMasterSocketFake::$readLengths);
     });
 
     function buildReadCoilsRequestPacket()
@@ -141,25 +156,32 @@ namespace PHPModbus {
     function fread($stream, $length)
     {
         ModbusMasterSocketFake::$readCalls++;
+        ModbusMasterSocketFake::$readLengths[] = $length;
 
         if (ModbusMasterSocketFake::$readResults) {
             return array_shift(ModbusMasterSocketFake::$readResults);
         }
 
-        $transactionId = ModbusMasterSocketFake::$responseTransactionId;
+        if (ModbusMasterSocketFake::$readBuffer === '') {
+            $transactionId = ModbusMasterSocketFake::$responseTransactionId;
 
-        if ($transactionId === 'match-request') {
-            $transactionId = substr(ModbusMasterSocketFake::$writtenPacket, 0, 2);
+            if ($transactionId === 'match-request') {
+                $transactionId = substr(ModbusMasterSocketFake::$writtenPacket, 0, 2);
+            }
+
+            if ($transactionId === 'mismatch-request') {
+                $transactionId = substr(ModbusMasterSocketFake::$writtenPacket, 0, 2) === "\x12\x34"
+                    ? "\x56\x78"
+                    : "\x12\x34";
+            }
+
+            ModbusMasterSocketFake::$receivedTransactionIds[] = $transactionId;
+            ModbusMasterSocketFake::$readBuffer = $transactionId . "\x00\x00\x00\x04\x01\x01\x01\x01";
         }
 
-        if ($transactionId === 'mismatch-request') {
-            $transactionId = substr(ModbusMasterSocketFake::$writtenPacket, 0, 2) === "\x12\x34"
-                ? "\x56\x78"
-                : "\x12\x34";
-        }
+        $chunk = substr(ModbusMasterSocketFake::$readBuffer, 0, $length);
+        ModbusMasterSocketFake::$readBuffer = substr(ModbusMasterSocketFake::$readBuffer, $length);
 
-        ModbusMasterSocketFake::$receivedTransactionIds[] = $transactionId;
-
-        return $transactionId . "\x00\x00\x00\x04\x01\x01\x01\x01";
+        return $chunk;
     }
 }

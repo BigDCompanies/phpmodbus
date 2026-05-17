@@ -3,6 +3,7 @@
 namespace PHPModbus;
 
 use Exception;
+use Psr\Log\LoggerInterface;
 
 /**
  * Phpmodbus Copyright (c) 2004, 2013 Jan Krakora
@@ -89,6 +90,11 @@ class ModbusMaster
      */
     private $transactionId = null;
 
+    /**
+     * @var LoggerInterface|null
+     */
+    private $logger = null;
+
 
 	/**
 	 * ModbusMaster
@@ -119,6 +125,19 @@ class ModbusMaster
 	public function __destruct()
     {
         $this->disconnect();
+    }
+
+    /**
+     * Set the PSR-3 logger used for debug output.
+     *
+     * @param LoggerInterface $logger
+     * @return $this
+     */
+    public function setLogger(LoggerInterface $logger)
+    {
+        $this->logger = $logger;
+
+        return $this;
     }
 
     /**
@@ -1528,7 +1547,13 @@ class ModbusMaster
 	private function log($txt)
 	{
 		$this->status .= $txt."\n";
-		if($this->debug) echo date( DATE_RFC822 ). " - $txt\n";
+		if($this->debug) {
+            if ($this->logger === null) {
+                $this->logger = new EchoLogger();
+            }
+
+            $this->logger->debug($txt);
+        }
 	}
 
 	public function crc16($data)

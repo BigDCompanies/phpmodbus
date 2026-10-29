@@ -3,7 +3,11 @@
     <coverage/>
     <testsuites>
         <testsuite name="Unit">
+            <file>./tests/PhpTypeTest.php</file>
             <directory suffix="Test.php">./tests/Unit</directory>
+        </testsuite>
+        <testsuite name="Integration">
+            <directory suffix="Test.php">./tests/Integration</directory>
         </testsuite>
     </testsuites>
     <php>

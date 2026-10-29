@@ -2,8 +2,6 @@
 
 namespace PHPModbus;
 
-use Exception;
-
 /**
  * Phpmodbus Copyright (c) 2004, 2013 Jan Krakora
  *
@@ -45,7 +43,14 @@ use Exception;
  */
 class ModbusMaster
 {
-	private $sock;
+	private $sock = null;
+
+    private $keepConnected = false;
+
+    private $transactionId = 0;
+
+    /** @var int Opt-in retries (0 or 1) for TCP FC1-FC4 communication failures. */
+    public $read_retries = 0;
 
 	public $host = "192.168.1.1";
 
@@ -76,7 +81,7 @@ class ModbusMaster
     private $connected = false;
 
     /**
-     * @var float microsecond of last communication - used for request delay.
+     * @var float Time of the last sent bytes, used for the request delay.
      */
     private $last_request = 0;
 
@@ -113,167 +118,369 @@ class ModbusMaster
     }
 
     /**
-	 * connect
-	 *
-	 * Connect the socket
-	 *
-	 * @return bool
-	 * @throws Exception
-	 */
-	public function connect()
-	{
-		// Create a protocol specific socket
-		if ($this->socket_protocol == "TCP" || $this->socket_protocol == "RTU_TCP") {
-			// TCP socket
-			$this->sock = socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
-		} elseif ($this->socket_protocol == "UDP") {
-			// UDP socket
-			$this->sock = socket_create(AF_INET, SOCK_DGRAM, SOL_UDP);
-		} else {
-			throw new Exception("Unknown socket protocol, should be 'TCP' or 'UDP'");
-		}
-		// Bind the client socket to a specific local port
-		if (strlen($this->client) > 0) {
-			$result = socket_bind($this->sock, $this->client, $this->client_port);
-			if ($result === false) {
-				throw new Exception("socket_bind() failed.\nReason: ($result)" .
-					socket_strerror(socket_last_error($this->sock)));
-			} else {
-				$this->log( "Bound" );
-			}
-		}
-		socket_set_nonblock($this->sock);
-		// Socket settings
-		socket_set_option($this->sock, SOL_SOCKET, SO_SNDTIMEO, array('sec' => $this->timeout_sec, 'usec' => 0));
-		socket_set_option($this->sock, SOL_SOCKET, SO_RCVTIMEO, array('sec' => $this->timeout_sec, 'usec' => 0));
-		$error = null;
-		$attempts = 0;
-		// Connect the socket
-		while( !($result = @socket_connect($this->sock, $this->host, $this->port)) && $attempts++ < $this->timeout_sec*1000) {
-			$error = socket_last_error();
-			if($error == SOCKET_EISCONN) {
-				$this->log( "Connected Mac Method" );
-	            $this->connected = true;
-	            socket_set_block($this->sock);
-				return true;
-			}
-			if($error != SOCKET_EINPROGRESS && $error != SOCKET_EALREADY) {
-				socket_close($this->sock);
-				throw new Exception("Error connecting (attempt $attempts) Socket: ($error) ".socket_strerror($error));
-			}
-			usleep(1000);
+     * Connect explicitly to reuse the connection across calls, including recovery
+     * after a failed exchange. Automatic connections last for one operation.
+     */
+    public function connect()
+    {
+        $this->openSocket($this->deadline());
+        $this->keepConnected = true;
 
-		}
+        return true;
+    }
 
-		if($result !== false) {
-			$this->log("Connected Linux Method");
-	        $this->connected = true;
-	        socket_set_block($this->sock);
-	        return true;
-		}
+    private function openSocket($deadline)
+    {
+        if ($this->connected) {
+            return;
+        }
+        if (!in_array($this->socket_protocol, array('TCP', 'UDP', 'RTU_TCP'), true)) {
+            throw new \InvalidArgumentException("Unknown socket protocol, should be 'TCP', 'UDP' or 'RTU_TCP'");
+        }
 
-	    $this->connected = false;
-		throw new Exception("socket_connect() failed.\nTimeout or Reason: (".socket_last_error($this->sock).")" .
-			socket_strerror(socket_last_error($this->sock)));
-	}
+        try {
+            $udp = $this->socket_protocol === 'UDP';
+            $socket = @socket_create(AF_INET, $udp ? SOCK_DGRAM : SOCK_STREAM, $udp ? SOL_UDP : SOL_TCP);
+            if ($socket === false) {
+                throw $this->socketError('create', socket_last_error());
+            }
+            $this->sock = $socket;
+            if (!@socket_set_nonblock($socket)) {
+                throw $this->socketError('set nonblocking mode', socket_last_error($socket));
+            }
+            if (strlen($this->client) > 0 && !@socket_bind($socket, $this->client, $this->client_port)) {
+                throw $this->socketError('bind', socket_last_error($socket));
+            }
 
-	/**
-	 * disconnect
-	 *
-	 * Disconnect the socket
-	 */
-	public function disconnect()
-	{
-		if($this->connected) {
-			socket_close($this->sock);
-	        $this->connected = false;
-			$this->log( "Disconnected" );
-		}
-	}
+            socket_clear_error($socket);
+            if (!@socket_connect($socket, $this->host, $this->port)) {
+                $error = socket_last_error($socket);
+                if ($error !== SOCKET_EISCONN && !$this->connectPending($error)) {
+                    throw $this->socketError('connect', $error);
+                }
+                while ($error !== SOCKET_EISCONN) {
+                    $this->waitForSocket(false, $deadline);
+                    $error = @socket_get_option($socket, SOL_SOCKET, SO_ERROR);
+                    if ($error === 0) {
+                        break;
+                    }
+                    if ($error === false || !$this->connectPending($error)) {
+                        throw $this->socketError('connect', $error === false ? socket_last_error($socket) : $error);
+                    }
+                }
+            }
+            $this->connected = true;
+            $this->log('Connected');
+        } catch (\Throwable $error) {
+            $this->closeSocket();
+            throw $error;
+        }
+    }
 
-	/**
-	 * send
-	 *
-	 * Send the packet via Modbus
-	 *
-	 * @param string $packet
-	 */
-	private function send($packet)
-	{
-		if((microtime(true) - $this->last_request) < $this->request_delay) {
-			$delay = round(1000000*($this->request_delay - (microtime(true) - $this->last_request)));
-			$this->log( "Request too fast, sleeping for $delay");
-			usleep($delay);
-		}
-		if($this->socket_protocol == "RTU_TCP") {
-			// Trim TCP ADU
-			$packet = substr($packet, 6);
-			// LOOKUP AND APPEND CRC
-			$append = $this->crc16($packet);
-			$packet = $packet.$append;
-		}
-		$this->log( "Really Sending This Packet: ".$this->printPacket($packet) );
-		socket_write($this->sock, $packet, strlen($packet));
-		$this->log( "Send" );
-		$this->last_request = microtime(true);
-	}
+    public function disconnect()
+    {
+        $this->keepConnected = false;
+        $this->closeSocket();
+    }
 
-	/**
-	 * rec
-	 *
-	 * Receive data from the socket
-	 *
-	 * @return bool
-	 * @throws Exception
-	 */
-	private function rec()
-	{
-		if($this->socket_protocol == "RTU_TCP") {
-			usleep(250000);
-		}
-		socket_set_nonblock($this->sock);
-		$readsocks[] = $this->sock;
-		$writesocks = null;
-		$exceptsocks = null;
-		$rec = "";
-		$lastAccess = time();
-		while (socket_select($readsocks, $writesocks, $exceptsocks, 0, 300000) !== false) {
-			//$this->log( "Wait data ... " );
-			if (in_array($this->sock, $readsocks)) {
-				//$this->log( "Try Read Data" );
-				while (@socket_recv($this->sock, $rec, 2000, 0)) {
-					$this->log( "Data received" );
-					if($this->socket_protocol == "RTU_TCP") {
-						// CHECK CRC, return null if bad CRC!
-						$calc_crc = $this->crc16(substr($rec,0,-2));
-						$rec_crc = substr($rec, -2);
-						if($calc_crc != $rec_crc) {
-							$this->log("Received CRC and Calc CRC do not match!");
-							return null;
-						}
-						// TRIM RTU CRC, ADD DUMMY TCP ADU
-						$packet = substr($rec,0,-2);
-						$buffer3 = '';
-						$buffer3 .= IecType::iecINT(rand(0, 65000));   // dummy transaction ID
-						$buffer3 .= IecType::iecINT(0);               // protocol ID
-						$buffer3 .= IecType::iecINT(strlen($packet));    // length
-						return $buffer3.$packet;
-					}
-					return $rec;
-				}
-				$lastAccess = time();
-			} else {
-				if (time() - $lastAccess >= $this->timeout_sec) {
-					throw new Exception("Watchdog time expired [ " .
-						$this->timeout_sec . " sec]!!! Connection to " .
-						$this->host . " is not established.");
-				}
-			}
-			$readsocks[] = $this->sock;
-		}
-		$this->last_request = microtime(true);
-		return null;
-	}
+    private function closeSocket()
+    {
+        $socket = $this->sock;
+        // Clear ownership before closing: failed connect, cleanup and destruction
+        // must never close the same PHP 8 Socket object twice.
+        $this->sock = null;
+        $this->connected = false;
+        if ($socket !== null) {
+            socket_close($socket);
+            $this->log('Disconnected');
+        }
+    }
+
+    /**
+     * One outstanding request per client. Only communication failures can be
+     * retried; application exceptions (including signal handlers) propagate.
+     */
+    private function exchange($packet)
+    {
+        $function = ord($packet[7]);
+        $retryable = $this->socket_protocol === 'TCP' && $function >= 1 && $function <= 4;
+        if ($retryable && $this->read_retries !== 0 && $this->read_retries !== 1) {
+            throw new \InvalidArgumentException('read_retries must be 0 or 1');
+        }
+        $retries = $retryable ? $this->read_retries : 0;
+        $firstFailure = null;
+
+        try {
+            for ($attempt = 0; $attempt <= $retries; $attempt++) {
+                try {
+                    if ($attempt > 0) {
+                        $packet = $this->nextTransactionId() . substr($packet, 2);
+                    }
+                    $this->waitForTurnaround();
+                    $deadline = $this->deadline();
+                    $this->openSocket($deadline);
+                    $this->send($packet, $deadline);
+                    $response = $this->receive($packet, $deadline);
+                    $this->validateResponse($packet, $response);
+                    $this->responseCode($response);
+
+                    return $response;
+                } catch (CommunicationException $error) {
+                    $this->closeSocket();
+                    if ($attempt === $retries) {
+                        if ($firstFailure !== null) {
+                            throw new CommunicationException($error->getMessage(), $error->getCode(), $firstFailure);
+                        }
+                        throw $error;
+                    }
+                    $firstFailure = $error;
+                } catch (DeviceException $error) {
+                    // A matched device error is a complete response. The
+                    // connection is still synchronized and is safe to reuse.
+                    throw $error;
+                } catch (\Throwable $error) {
+                    $this->closeSocket();
+                    throw $error;
+                }
+            }
+        } finally {
+            if (!$this->keepConnected) {
+                $this->closeSocket();
+            }
+        }
+    }
+
+    private function send($packet, $deadline)
+    {
+        if ($this->socket_protocol === 'RTU_TCP') {
+            $packet = substr($packet, 6);
+            $packet .= $this->crc16($packet);
+        }
+        $this->log('Sending: ' . $this->printPacket($packet));
+        $offset = 0;
+        while ($offset < strlen($packet)) {
+            $this->waitForSocket(false, $deadline);
+            socket_clear_error($this->sock);
+            $sent = @socket_write($this->sock, substr($packet, $offset));
+            if ($sent === false) {
+                $error = socket_last_error($this->sock);
+                if ($this->interruptedOrWouldBlock($error)) {
+                    continue;
+                }
+                throw $this->socketError('write', $error);
+            }
+            if ($sent === 0 || ($this->socket_protocol === 'UDP' && $sent !== strlen($packet))) {
+                throw new CommunicationException('Modbus request could not be sent completely');
+            }
+            $offset += $sent;
+            $this->last_request = $this->now();
+        }
+    }
+
+    private function receive($request, $deadline)
+    {
+        if ($this->socket_protocol === 'RTU_TCP') {
+            return $this->readRtuResponse($request, $deadline);
+        }
+
+        do {
+            if ($this->socket_protocol === 'TCP') {
+                $header = $this->readExact(7, $deadline);
+                $length = $this->responseLength($header);
+                $response = $header . $this->readExact($length - 1, $deadline);
+            } else {
+                // One recv per datagram; an extra byte detects oversized packets.
+                $response = $this->readChunk(261, $deadline);
+                $length = $this->responseLength($response);
+                if (strlen($response) !== 6 + $length) {
+                    throw new CommunicationException('Modbus response length does not match its frame');
+                }
+            }
+            // Only discard complete, bounded frames. Never scan arbitrary bytes
+            // for a plausible header or let stale frames extend the deadline.
+        } while (substr($response, 0, 2) !== substr($request, 0, 2));
+
+        return $response;
+    }
+
+    private function responseLength($header)
+    {
+        if (strlen($header) < 7 || substr($header, 2, 2) !== "\x00\x00") {
+            throw new CommunicationException('Modbus response has an invalid MBAP header');
+        }
+        $length = unpack('n', substr($header, 4, 2))[1];
+        if ($length < 2 || $length > 254) {
+            throw new CommunicationException('Modbus response length is invalid');
+        }
+
+        return $length;
+    }
+
+    private function readExact($length, $deadline)
+    {
+        $data = '';
+        while (strlen($data) < $length) {
+            $data .= $this->readChunk($length - strlen($data), $deadline);
+        }
+
+        return $data;
+    }
+
+    private function readChunk($length, $deadline)
+    {
+        while (true) {
+            $this->waitForSocket(true, $deadline);
+            socket_clear_error($this->sock);
+            $data = '';
+            $received = @socket_recv($this->sock, $data, $length, 0);
+            if ($received === false) {
+                $error = socket_last_error($this->sock);
+                if ($this->interruptedOrWouldBlock($error)) {
+                    continue;
+                }
+                throw $this->socketError('read', $error);
+            }
+            if ($received === 0) {
+                throw new CommunicationException('Modbus connection closed before a complete response was received');
+            }
+
+            return $data;
+        }
+    }
+
+    private function readRtuResponse($request, $deadline)
+    {
+        $frame = $this->readExact(2, $deadline);
+        $function = ord($frame[1]);
+        if ($function & 0x80) {
+            $frame .= $this->readExact(3, $deadline);
+        } elseif (in_array($function, array(1, 2, 3, 4, 23), true)) {
+            $frame .= $this->readExact(1, $deadline);
+            $bytes = ord($frame[2]);
+            if ($bytes > 250) {
+                throw new CommunicationException('Modbus RTU response length is invalid');
+            }
+            $frame .= $this->readExact($bytes + 2, $deadline);
+        } elseif (in_array($function, array(5, 6, 15, 16, 22), true)) {
+            $frame .= $this->readExact($function === 22 ? 8 : 6, $deadline);
+        } else {
+            throw new CommunicationException('Modbus RTU response function is invalid');
+        }
+        $payload = substr($frame, 0, -2);
+        if ($this->crc16($payload) !== substr($frame, -2)) {
+            throw new CommunicationException('Modbus RTU response CRC does not match');
+        }
+
+        // The existing parsers consume an MBAP-shaped frame for every transport.
+        return substr($request, 0, 4) . pack('n', strlen($payload)) . $payload;
+    }
+
+    private function validateResponse($request, $response)
+    {
+        if (strlen($response) < 8 || $response[6] !== $request[6]) {
+            throw new CommunicationException('Modbus response unit does not match the request');
+        }
+        $function = ord($request[7]);
+        if (ord($response[7]) === ($function | 0x80)) {
+            if (strlen($response) !== 9) {
+                throw new CommunicationException('Modbus exception response length is invalid');
+            }
+            return;
+        }
+        if ($response[7] !== $request[7]) {
+            throw new CommunicationException('Modbus response function does not match the request');
+        }
+        if (in_array($function, array(1, 2, 3, 4, 23), true)) {
+            $quantity = unpack('n', substr($request, 10, 2))[1];
+            $bytes = $function <= 2 ? (int) ceil($quantity / 8) : $quantity * 2;
+            if (strlen($response) !== 9 + $bytes || ord($response[8]) !== $bytes) {
+                throw new CommunicationException('Modbus response byte count does not match the request');
+            }
+        } else {
+            $expected = in_array($function, array(15, 16), true) ? substr($request, 7, 5) : substr($request, 7);
+            if (substr($response, 7) !== $expected) {
+                throw new CommunicationException('Modbus write response does not echo the request');
+            }
+        }
+    }
+
+    private function waitForSocket($reading, $deadline)
+    {
+        while (true) {
+            $remaining = $deadline - $this->now();
+            if ($remaining <= 0) {
+                throw new CommunicationException("Watchdog time expired [ $this->timeout_sec sec ] waiting for Modbus at $this->host");
+            }
+            // select mutates these arrays, so recreate them after every interrupt.
+            $read = $reading ? array($this->sock) : null;
+            $write = $reading ? null : array($this->sock);
+            $except = null;
+            $seconds = (int) floor($remaining);
+            $microseconds = (int) floor(($remaining - $seconds) * 1000000);
+            socket_clear_error();
+            $ready = @socket_select($read, $write, $except, $seconds, $microseconds);
+            if ($ready === false) {
+                // select stores errno on the extension, not the individual socket.
+                $error = socket_last_error();
+                if ($error === SOCKET_EINTR) {
+                    continue;
+                }
+                throw $this->socketError('select', $error);
+            }
+            if ($ready > 0) {
+                return;
+            }
+        }
+    }
+
+    private function interruptedOrWouldBlock($error)
+    {
+        return $error === SOCKET_EINTR || $error === SOCKET_EAGAIN || $error === SOCKET_EWOULDBLOCK;
+    }
+
+    private function connectPending($error)
+    {
+        return $this->interruptedOrWouldBlock($error) || $error === SOCKET_EINPROGRESS || $error === SOCKET_EALREADY;
+    }
+
+    private function socketError($operation, $error)
+    {
+        return new CommunicationException('Modbus socket ' . $operation . ' failed: ' . socket_strerror($error), $error);
+    }
+
+    private function deadline()
+    {
+        if (!is_numeric($this->timeout_sec) || !is_finite((float) $this->timeout_sec) || $this->timeout_sec < 0) {
+            throw new \InvalidArgumentException('timeout_sec must be a finite nonnegative number');
+        }
+
+        return $this->now() + (float) $this->timeout_sec;
+    }
+
+    private function waitForTurnaround()
+    {
+        if (!is_numeric($this->request_delay) || !is_finite((float) $this->request_delay) || $this->request_delay < 0) {
+            throw new \InvalidArgumentException('request_delay must be a finite nonnegative number');
+        }
+        $until = $this->last_request + (float) $this->request_delay;
+        while (($remaining = $until - $this->now()) > 0) {
+            usleep((int) min(1000000, ceil($remaining * 1000000)));
+        }
+    }
+
+    private function now()
+    {
+        // hrtime is monotonic on PHP 7.3+. Keep the package's PHP 7.0-7.2 API
+        // compatibility, where only the wall clock is available without an extension.
+        return function_exists('hrtime') ? hrtime(true) / 1000000000 : microtime(true);
+    }
+
+    private function nextTransactionId()
+    {
+        $this->transactionId = ($this->transactionId + 1) & 0xffff;
+
+        return pack('n', $this->transactionId);
+    }
 
 	/**
 	 * responseCode
@@ -282,7 +489,7 @@ class ModbusMaster
 	 *
 	 * @param string $packet
 	 * @return bool
-	 * @throws Exception
+	 * @throws DeviceException
 	 */
 	private function responseCode($packet)
 	{
@@ -308,7 +515,7 @@ class ModbusMaster
 				$failure_str = "UNDEFINED FAILURE CODE";
 			}
 			// exception response
-			throw new Exception("Modbus response error code: $failure_code ($failure_str)");
+			throw new DeviceException("Modbus response error code: $failure_code ($failure_str)", $failure_code);
 		} else {
 			$this->log( "Modbus response error code: NOERROR" );
 			return true;
@@ -332,20 +539,12 @@ class ModbusMaster
 	public function readCoils($unitId, $reference, $quantity)
 	{
 		$this->log( "readCoils: START" );
-		// connect
-        $alreadyConnected = $this->connected;
-        if (!$alreadyConnected) $this->connect();
 		// send FC 1
 		$packet = $this->readCoilsPacketBuilder($unitId, $reference, $quantity);
-		$this->log( $this->printPacket($packet) );
-		$this->send($packet);
-		// receive response
-		$rpacket = $this->rec();
+		$rpacket = $this->exchange($packet);
 		$this->log( $this->printPacket($rpacket) );
 		// parse packet
 		$receivedData = $this->readCoilsParser($rpacket, $quantity);
-		// disconnect
-		if (!$alreadyConnected) $this->disconnect();
 		$this->log( "readCoils: DONE" );
 		// return
 		return $receivedData;
@@ -390,7 +589,7 @@ class ModbusMaster
 		$dataLen += 5;
 		// build header
 		$buffer3 = '';
-		$buffer3 .= IecType::iecINT(rand(0, 65000));   // transaction ID
+		$buffer3 .= $this->nextTransactionId();   // transaction ID
 		$buffer3 .= IecType::iecINT(0);               // protocol ID
 		$buffer3 .= IecType::iecINT($dataLen + 1);    // lenght
 		$buffer3 .= IecType::iecBYTE($unitId);        //unit ID
@@ -410,8 +609,6 @@ class ModbusMaster
 	private function readCoilsParser($packet, $quantity)
 	{
 		$data = array();
-		// check Response code
-		$this->responseCode($packet);
 		// get data from stream
 		for ($i = 0; $i < ord($packet[8]); $i++) {
 			$data[$i] = ord($packet[9 + $i]);
@@ -455,20 +652,12 @@ class ModbusMaster
 	public function readInputDiscretes($unitId, $reference, $quantity)
 	{
 		$this->log( "readInputDiscretes: START" );
-		// connect
-        $alreadyConnected = $this->connected;
-        if (!$alreadyConnected) $this->connect();
 		// send FC 2
 		$packet = $this->readInputDiscretesPacketBuilder($unitId, $reference, $quantity);
-		$this->log( $this->printPacket($packet) );
-		$this->send($packet);
-		// receive response
-		$rpacket = $this->rec();
+		$rpacket = $this->exchange($packet);
 		$this->log( $this->printPacket($rpacket) );
 		// parse packet
 		$receivedData = $this->readInputDiscretesParser($rpacket, $quantity);
-		// disconnect
-		if (!$alreadyConnected) $this->disconnect();
 		$this->log( "readInputDiscretes: DONE" );
 		// return
 		return $receivedData;
@@ -513,7 +702,7 @@ class ModbusMaster
 		$dataLen += 5;
 		// build header
 		$buffer3 = '';
-		$buffer3 .= IecType::iecINT(rand(0, 65000));   // transaction ID
+		$buffer3 .= $this->nextTransactionId();   // transaction ID
 		$buffer3 .= IecType::iecINT(0);               // protocol ID
 		$buffer3 .= IecType::iecINT($dataLen + 1);    // lenght
 		$buffer3 .= IecType::iecBYTE($unitId);        //unit ID
@@ -554,20 +743,12 @@ class ModbusMaster
 	public function readMultipleRegisters($unitId, $reference, $quantity)
 	{
 		$this->log( "readMultipleRegisters: START" );
-		// connect
-        $alreadyConnected = $this->connected;
-        if (!$alreadyConnected) $this->connect();
 		// send FC 3
 		$packet = $this->readMultipleRegistersPacketBuilder($unitId, $reference, $quantity);
-		$this->log( $this->printPacket($packet) );
-		$this->send($packet);
-		// receive response
-		$rpacket = $this->rec();
+		$rpacket = $this->exchange($packet);
 		$this->log( $this->printPacket($rpacket) );
 		// parse packet
 		$receivedData = $this->readMultipleRegistersParser($rpacket);
-		// disconnect
-		if (!$alreadyConnected) $this->disconnect();
 		$this->log( "readMultipleRegisters: DONE" );
 		// return
 		return $receivedData;
@@ -612,7 +793,7 @@ class ModbusMaster
 		$dataLen += 5;
 		// build header
 		$buffer3 = '';
-		$buffer3 .= IecType::iecINT(rand(0, 65000));   // transaction ID
+		$buffer3 .= $this->nextTransactionId();   // transaction ID
 		$buffer3 .= IecType::iecINT(0);               // protocol ID
 		$buffer3 .= IecType::iecINT($dataLen + 1);    // lenght
 		$buffer3 .= IecType::iecBYTE($unitId);        //unit ID
@@ -631,8 +812,6 @@ class ModbusMaster
 	private function readMultipleRegistersParser($packet)
 	{
 		$data = array();
-		// check Response code
-		$this->responseCode($packet);
 		// get data
 		for ($i = 0; $i < ord($packet[8]); $i++) {
 			$data[$i] = ord($packet[9 + $i]);
@@ -658,20 +837,12 @@ class ModbusMaster
 	public function readMultipleInputRegisters($unitId, $reference, $quantity)
 	{
 		$this->log( "readMultipleInputRegisters: START" );
-		// connect
-        $alreadyConnected = $this->connected;
-        if (!$alreadyConnected) $this->connect();
 		// send FC 4
 		$packet = $this->readMultipleInputRegistersPacketBuilder($unitId, $reference, $quantity);
-		$this->log( $this->printPacket($packet) );
-		$this->send($packet);
-		// receive response
-		$rpacket = $this->rec();
+		$rpacket = $this->exchange($packet);
 		$this->log( $this->printPacket($rpacket) );
 		// parse packet
 		$receivedData = $this->readMultipleInputRegistersParser($rpacket);
-		// disconnect
-		if (!$alreadyConnected) $this->disconnect();
 		$this->log( "readMultipleInputRegisters: DONE" );
 		// return
 		return $receivedData;
@@ -716,7 +887,7 @@ class ModbusMaster
 		$dataLen += 5;
 		// build header
 		$buffer3 = '';
-		$buffer3 .= IecType::iecINT(rand(0, 65000));                                     // transaction ID
+		$buffer3 .= $this->nextTransactionId();                                     // transaction ID
 		$buffer3 .= IecType::iecINT(0);                                                 // protocol ID
 		$buffer3 .= IecType::iecINT($dataLen + 1);                                      // lenght
 		$buffer3 .= IecType::iecBYTE($unitId);                                          // unit ID
@@ -735,8 +906,6 @@ class ModbusMaster
 	private function readMultipleInputRegistersParser($packet)
 	{
 		$data = array();
-		// check Response code
-		$this->responseCode($packet);
 		// get data
 		for ($i = 0; $i < ord($packet[8]); $i++) {
 			$data[$i] = ord($packet[9 + $i]);
@@ -762,20 +931,10 @@ class ModbusMaster
 	public function writeSingleCoil($unitId, $reference, $data)
 	{
 		$this->log( "writeSingleCoil: START" );
-		// connect
-        $alreadyConnected = $this->connected;
-        if (!$alreadyConnected) $this->connect();
 		// send FC5
 		$packet = $this->writeSingleCoilPacketBuilder($unitId, $reference, $data);
-		$this->log( $this->printPacket($packet) );
-		$this->send($packet);
-		// receive response
-		$rpacket = $this->rec();
+		$rpacket = $this->exchange($packet);
 		$this->log( $this->printPacket($rpacket) );
-		// parse packet
-		$this->writeSingleCoilParser($rpacket);
-		// disconnect
-		if (!$alreadyConnected) $this->disconnect();
 		$this->log( "writeSingleCoil: DONE" );
 		return true;
 	}
@@ -825,27 +984,13 @@ class ModbusMaster
 		$dataLen += 3;
 		// build header
 		$buffer3 = '';
-		$buffer3 .= IecType::iecINT(rand(0, 65000));   // transaction ID
+		$buffer3 .= $this->nextTransactionId();   // transaction ID
 		$buffer3 .= IecType::iecINT(0);               // protocol ID
 		$buffer3 .= IecType::iecINT($dataLen + 1);    // lenght
 		$buffer3 .= IecType::iecBYTE($unitId);        //unit ID
 
 		// return packet string
 		return $buffer3 . $buffer2 . $buffer1;
-	}
-
-	/**
-	 * writeSingleCoilParser
-	 *
-	 * FC5 response parser
-	 *
-	 * @param string $packet
-	 * @return bool
-	 */
-	private function writeSingleCoilParser($packet)
-	{
-		$this->responseCode($packet);
-		return true;
 	}
 
 	/**
@@ -866,20 +1011,10 @@ class ModbusMaster
 	public function writeSingleRegister($unitId, $reference, $data)
 	{
 		$this->log( "writeSingleRegister: START" );
-		// connect
-        $alreadyConnected = $this->connected;
-        if (!$alreadyConnected) $this->connect();
 		// send FC6
 		$packet = $this->writeSingleRegisterPacketBuilder($unitId, $reference, $data);
-		$this->log( $this->printPacket($packet) );
-		$this->send($packet);
-		// receive response
-		$rpacket = $this->rec();
+		$rpacket = $this->exchange($packet);
 		$this->log( $this->printPacket($rpacket) );
-		// parse packet
-		$this->writeSingleRegisterParser($rpacket);
-		// disconnect
-		if (!$alreadyConnected) $this->disconnect();
 		$this->log( "writeSingleRegister: DONE" );
 		return true;
 	}
@@ -926,27 +1061,13 @@ class ModbusMaster
 		$dataLen += 3;
 		// build header
 		$buffer3 = '';
-		$buffer3 .= IecType::iecINT(rand(0, 65000));   // transaction ID
+		$buffer3 .= $this->nextTransactionId();   // transaction ID
 		$buffer3 .= IecType::iecINT(0);               // protocol ID
 		$buffer3 .= IecType::iecINT($dataLen + 1);    // lenght
 		$buffer3 .= IecType::iecBYTE($unitId);        //unit ID
 
 		// return packet string
 		return $buffer3 . $buffer2 . $buffer1;
-	}
-
-	/**
-	 * writeSingleRegisterParser
-	 *
-	 * FC6 response parser
-	 *
-	 * @param string $packet
-	 * @return bool
-	 */
-	private function writeSingleRegisterParser($packet)
-	{
-		$this->responseCode($packet);
-		return true;
 	}
 
 	/**
@@ -965,20 +1086,10 @@ class ModbusMaster
 	public function writeMultipleCoils($unitId, $reference, $data)
 	{
 		$this->log( "writeMultipleCoils: START" );
-		// connect
-        $alreadyConnected = $this->connected;
-        if (!$alreadyConnected) $this->connect();
 		// send FC15
 		$packet = $this->writeMultipleCoilsPacketBuilder($unitId, $reference, $data);
-		$this->log( $this->printPacket($packet) );
-		$this->send($packet);
-		// receive response
-		$rpacket = $this->rec();
+		$rpacket = $this->exchange($packet);
 		$this->log( $this->printPacket($rpacket) );
-		// parse packet
-		$this->writeMultipleCoilsParser($rpacket);
-		// disconnect
-		if (!$alreadyConnected) $this->disconnect();
 		$this->log( "writeMultipleCoils: DONE" );
 		return true;
 	}
@@ -1047,27 +1158,13 @@ class ModbusMaster
 		$dataLen += 6;
 		// build header
 		$buffer3 = '';
-		$buffer3 .= IecType::iecINT(rand(0, 65000));   // transaction ID
+		$buffer3 .= $this->nextTransactionId();   // transaction ID
 		$buffer3 .= IecType::iecINT(0);               // protocol ID
 		$buffer3 .= IecType::iecINT($dataLen + 1);    // lenght
 		$buffer3 .= IecType::iecBYTE($unitId);        // unit ID
 
 		// return packet string
 		return $buffer3 . $buffer2 . $buffer1;
-	}
-
-	/**
-	 * writeMultipleCoilsParser
-	 *
-	 * FC15 response parser
-	 *
-	 * @param string $packet
-	 * @return bool
-	 */
-	private function writeMultipleCoilsParser($packet)
-	{
-		$this->responseCode($packet);
-		return true;
 	}
 
 	/**
@@ -1090,20 +1187,10 @@ class ModbusMaster
 	public function writeMultipleRegister($unitId, $reference, $data, $dataTypes)
 	{
 		$this->log( "writeMultipleRegister: START" );
-		// connect
-        $alreadyConnected = $this->connected;
-        if (!$alreadyConnected) $this->connect();
 		// send FC16
 		$packet = $this->writeMultipleRegisterPacketBuilder($unitId, $reference, $data, $dataTypes);
-		$this->log( $this->printPacket($packet) );
-		$this->send($packet);
-		// receive response
-		$rpacket = $this->rec();
+		$rpacket = $this->exchange($packet);
 		$this->log( $this->printPacket($rpacket) );
-		// parse packet
-		$this->writeMultipleRegisterParser($rpacket);
-		// disconnect
-		if (!$alreadyConnected) $this->disconnect();
 		$this->log( "writeMultipleRegister: DONE" );
 		return true;
 	}
@@ -1165,27 +1252,13 @@ class ModbusMaster
 		$dataLen += 6;
 		// build header
 		$buffer3 = '';
-		$buffer3 .= IecType::iecINT(rand(0, 65000));   // transaction ID
+		$buffer3 .= $this->nextTransactionId();   // transaction ID
 		$buffer3 .= IecType::iecINT(0);               // protocol ID
 		$buffer3 .= IecType::iecINT($dataLen + 1);    // lenght
 		$buffer3 .= IecType::iecBYTE($unitId);        //unit ID
 
 		// return packet string
 		return $buffer3 . $buffer2 . $buffer1;
-	}
-
-	/**
-	 * writeMultipleRegisterParser
-	 *
-	 * FC16 response parser
-	 *
-	 * @param string $packet
-	 * @return bool
-	 */
-	private function writeMultipleRegisterParser($packet)
-	{
-		$this->responseCode($packet);
-		return true;
 	}
 
 	/**
@@ -1208,20 +1281,10 @@ class ModbusMaster
 	public function maskWriteRegister($unitId, $reference, $andMask, $orMask)
 	{
 		$this->log( "maskWriteRegister: START" );
-		// connect
-        $alreadyConnected = $this->connected;
-        if (!$alreadyConnected) $this->connect();
 		// send FC22
 		$packet = $this->maskWriteRegisterPacketBuilder($unitId, $reference, $andMask, $orMask);
-		$this->log( $this->printPacket($packet) );
-		$this->send($packet);
-		// receive response
-		$rpacket = $this->rec();
+		$rpacket = $this->exchange($packet);
 		$this->log( $this->printPacket($rpacket) );
-		// parse packet
-		$this->maskWriteRegisterParser($rpacket);
-		// disconnect
-		if (!$alreadyConnected) $this->disconnect();
 		$this->log( "maskWriteRegister: DONE" );
 		return true;
 	}
@@ -1267,26 +1330,12 @@ class ModbusMaster
 		$dataLen += 7;
 		// build header
 		$buffer3 = '';
-		$buffer3 .= IecType::iecINT(rand(0, 65000));   // transaction ID
+		$buffer3 .= $this->nextTransactionId();   // transaction ID
 		$buffer3 .= IecType::iecINT(0);               // protocol ID
 		$buffer3 .= IecType::iecINT($dataLen + 1);    // lenght
 		$buffer3 .= IecType::iecBYTE($unitId);        //unit ID
 		// return packet string
 		return $buffer3 . $buffer2 . $buffer1;
-	}
-
-	/**
-	 * maskWriteRegisterParser
-	 *
-	 * FC22 response parser
-	 *
-	 * @param string $packet
-	 * @return bool
-	 */
-	private function maskWriteRegisterParser($packet)
-	{
-		$this->responseCode($packet);
-		return true;
 	}
 
 	/**
@@ -1312,21 +1361,13 @@ class ModbusMaster
 	public function readWriteRegisters($unitId, $referenceRead, $quantity, $referenceWrite, $data, $dataTypes)
 	{
 		$this->log( "readWriteRegisters: START" );
-		// connect
-        $alreadyConnected = $this->connected;
-        if (!$alreadyConnected) $this->connect();
 		// send FC23
 		$packet = $this->readWriteRegistersPacketBuilder($unitId, $referenceRead, $quantity, $referenceWrite, $data,
 			$dataTypes);
-		$this->log( $this->printPacket($packet) );
-		$this->send($packet);
-		// receive response
-		$rpacket = $this->rec();
+		$rpacket = $this->exchange($packet);
 		$this->log( $this->printPacket($rpacket) );
 		// parse packet
 		$receivedData = $this->readWriteRegistersParser($rpacket);
-		// disconnect
-		if (!$alreadyConnected) $this->disconnect();
 		$this->log( "writeMultipleRegister: DONE" );
 		// return
 		return $receivedData;
@@ -1403,7 +1444,7 @@ class ModbusMaster
 		$dataLen += 10;
 		// build header
 		$buffer3 = '';
-		$buffer3 .= IecType::iecINT(rand(0, 65000));   // transaction ID
+		$buffer3 .= $this->nextTransactionId();   // transaction ID
 		$buffer3 .= IecType::iecINT(0);               // protocol ID
 		$buffer3 .= IecType::iecINT($dataLen + 1);    // lenght
 		$buffer3 .= IecType::iecBYTE($unitId);        //unit ID
@@ -1423,10 +1464,6 @@ class ModbusMaster
 	private function readWriteRegistersParser($packet)
 	{
 		$data = array();
-		// if not exception
-		if (!$this->responseCode($packet)) {
-			return false;
-		}
 		// get data
 		for ($i = 0; $i < ord($packet[8]); $i++) {
 			$data[$i] = ord($packet[9 + $i]);
